@@ -7,7 +7,7 @@ const { db } = require("../config/firebase");
 async function firestorePing(req, res) {
   try {
     // Intentamos leer un "timestamp" del servidor
-    const now = new Date().toISOString();
+    const now = new Date().toISOString(); // Fecha actual en ISO. ISO es un formato estándar y legible por humanos y máquinas (YYYY-MM-DDTHH:mm:ss.sssZ)
 
     // Escribimos un doc de prueba (colección: _health)
     const ref = db.collection("_health").doc("ping");

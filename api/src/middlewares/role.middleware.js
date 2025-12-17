@@ -1,22 +1,23 @@
 /**
- * Middleware de roles (reutilizable)
- * Uso: requireRole("admin") o requireRole("user")
+ * Middleware de roles basado en Custom Claims (Firebase)
+ * Uso: requireRole("admin")
  */
 function requireRole(requiredRole) {
   return function (req, res, next) {
-    // Si no hay usuario en req.user, es porque no pasó authMiddleware
-    if (!req.user) {
+    // Debe existir usuario autenticado
+    if (!req.user || !req.user.claims) {
       return res.status(401).json({ message: "No autenticado" });
     }
 
-    // Si el rol no coincide, bloqueamos
-    if (req.user.role !== requiredRole) {
+    // El rol vive en los custom claims
+    const role = req.user.claims.role;
+
+    if (role !== requiredRole) {
       return res.status(403).json({ message: "No autorizado" });
     }
 
-    // Si cumple, dejamos pasar
     next();
   };
 }
 
-module.exports = { requireRole }; // Exportamos la función para usarla en rutas
+module.exports = { requireRole };
