@@ -10,6 +10,8 @@ const healthRoutes = require("./health.routes"); // Ruta de health check. Sirve 
 const firestoreRoutes = require("./firestore.routes"); // Rutas para operaciones con Firestore. Sirven para gestionar datos en la base de datos.
 const meRoutes = require("./me.routes"); // Rutas para el usuario autenticado. Sirven para que el usuario gestione su propia información.
 const adminClaimsRoutes = require("./adminClaims.routes"); // Rutas para gestión de custom claims de admin. Sirven para asignar roles de administrador a usuarios.
+const productsRoutes = require("./products.routes"); // Rutas para gestión de productos. Sirven para crear, leer, actualizar y eliminar productos.
+const auditLogsRoutes = require("./auditLogs.routes"); // Rutas para gestión de logs de auditoría. Sirven para revisar las acciones realizadas en el sistema.
 
 
 // Montamos rutas
@@ -17,5 +19,7 @@ router.use(healthRoutes);
 router.use(firestoreRoutes);
 router.use(meRoutes);
 router.use(adminClaimsRoutes);
+router.use(productsRoutes);
+router.use(auditLogsRoutes);
 
 module.exports = router;

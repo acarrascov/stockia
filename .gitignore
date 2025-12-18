@@ -1,0 +1,12 @@
+# Dependencias
+node_modules/
+api/node_modules/
+
+# Variables de entorno
+.env
+
+# Firebase / credenciales
+serviceAccountKey.json
+
+# MacOS
+.DS_Store
