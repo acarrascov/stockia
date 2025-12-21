@@ -1,16 +1,24 @@
 /**
  * Routes: health
- * Aquí definimos las rutas/URLs relacionadas a health
+ * - /health      => protegida (solo admin)
+ * - /public/health => pública (para ping desde frontend / tests)
  */
+
 const express = require("express");
 const router = express.Router();
 
-const { healthCheck } = require("../controllers/health.controller"); // Importamos el controller de health
-const authMiddleware = require("../middlewares/auth.middleware"); // Importamos el middleware de auth
-const { requireRole } = require("../middlewares/role.middleware"); // Importamos el middleware de roles
-const firebaseAuth = require("../middlewares/firebaseAuth.middleware");
+const { healthCheck } = require("../controllers/health.controller");
 
-// Ruta GET /health protegida por Firebase Auth y rol admin
+// Middlewares de auth/roles (solo para la ruta protegida)
+const firebaseAuth = require("../middlewares/firebaseAuth.middleware");
+const { requireRole } = require("../middlewares/role.middleware");
+
+// ✅ Ruta pública: sirve para probar conectividad desde el frontend SIN token
+// GET /api/public/health
+router.get("/public/health", healthCheck);
+
+// 🔒 Ruta protegida: requiere token Firebase + rol admin
+// GET /api/health
 router.get("/health", firebaseAuth, requireRole("admin"), healthCheck);
 
-module.exports = router; // Exportamos el router para usarlo en el servidor
+module.exports = router;
