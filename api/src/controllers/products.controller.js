@@ -5,7 +5,9 @@
  */
 const { db } = require("../config/firebase");
 
-
+// Valida payload de producto (crear o actualizar). Payload es el body de la request.
+// esta función se usa tanto para crear como para actualizar (parcial) y valida los campos necesarios
+// Retorna { ok: boolean, errors: [string], normalized: object }
 function validateProductPayload(body, { partial = false } = {}) {
   const errors = [];
 
@@ -59,6 +61,25 @@ function validateProductPayload(body, { partial = false } = {}) {
   return { ok: errors.length === 0, errors, normalized };
 }
 
+async function assertSkuUnique(sku, excludeId = null) { 
+  const snap = await db
+    .collection("products")
+    .where("sku", "==", sku)
+    .limit(5)
+    .get();
+
+  if (snap.empty) return;
+
+  // Si estamos editando, permitimos el mismo SKU solo si es el mismo documento
+  const existsOther = snap.docs.some((d) => d.id !== excludeId);
+  if (existsOther) {
+    const err = new Error("SKU ya existe");
+    err.statusCode = 409;
+    throw err;
+  }
+}
+
+
 // POST /api/products  -> crear producto
 async function createProduct(req, res) {
   try {
@@ -66,6 +87,8 @@ async function createProduct(req, res) {
     if (!ok) return res.status(400).json({ ok: false, errors });
 
     const { name, sku, category, price, stock } = normalized;
+
+    await assertSkuUnique(sku); // lanza error 409 si ya existe
 
     const now = new Date().toISOString();
 
@@ -87,35 +110,30 @@ async function createProduct(req, res) {
   }
 }
 
+
 // GET /api/products
 async function productsList(req, res) {
   try {
-    const limitNum = Math.min(parseInt(req.query.limit || "20", 10), 50); // max 50
-    const cursor = req.query.cursor || null;
-    const all = req.query.all === "true";
+    // ✅ Solo admin puede pedir inactivos
+    const includeInactive =
+      (req.query.includeInactive === "1" || req.query.includeInactive === "true") &&
+      req.user?.claims?.role === "admin";
 
-    let q = db.collection("products").orderBy("createdAt", "desc").limit(limitNum);
+    let query = db.collection("products");
 
-    // por defecto solo activos
-    if (!all) q = q.where("active", "==", true);
-
-    // cursor: buscamos el doc del último id y usamos startAfter(doc)
-    if (cursor) {
-      const lastDoc = await db.collection("products").doc(cursor).get();
-      if (lastDoc.exists) {
-        q = q.startAfter(lastDoc);
-      }
+    // ✅ Por defecto: solo activos
+    if (!includeInactive) {
+      query = query.where("active", "==", true);
     }
 
-    const snap = await q.get();
+    // (si ya tienes paginación/orden, déjalo como lo tenías)
+    const snap = await query.get();
 
     const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
-    const nextCursor = snap.docs.length ? snap.docs[snap.docs.length - 1].id : null;
-
-    return res.json({ ok: true, items, nextCursor, limit: limitNum, all });
-  } catch (err) {
-    return res.status(500).json({ ok: false, message: "Error listando productos", error: err.message });
+    return res.json({ ok: true, items });
+  } catch (error) {
+    return res.status(500).json({ ok: false, message: error.message });
   }
 }
 
@@ -142,24 +160,52 @@ async function updateProduct(req, res) {
   try {
     const { id } = req.params;
 
+    // Campos permitidos a actualizar
     const allowed = ["name", "sku", "category", "price", "stock", "active"];
 
+    // Construir objeto updates solo con campos enviados
     const updates = {};
     for (const key of allowed) {
-      if (req.body[key] !== undefined) updates[key] = req.body[key];
+      if (req.body[key] !== undefined) {
+        updates[key] = req.body[key];
+      }
     }
 
     if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ ok: false, message: "No hay campos para actualizar" });
+      return res.status(400).json({
+        ok: false,
+        message: "No hay campos para actualizar",
+      });
     }
 
-    const { ok, errors, normalized } = validateProductPayload(updates, { partial: true });
-    if (!ok) return res.status(400).json({ ok: false, errors });
+    // Validación parcial
+    const { ok, errors, normalized } = validateProductPayload(updates, {
+      partial: true,
+    });
+    if (!ok) {
+      return res.status(400).json({ ok: false, errors });
+    }
 
+    // Aplicar valores normalizados
     Object.assign(updates, normalized);
 
-    // CLP: solo si se está tocando precio (o si venía currency)
-    if (updates.price !== undefined || updates.currency !== undefined) {
+    const ref = db.collection("products").doc(id);
+    const snap = await ref.get();
+
+    if (!snap.exists) {
+      return res.status(404).json({
+        ok: false,
+        message: "Producto no encontrado",
+      });
+    }
+
+    // 👉 Paso 3: validar SKU único (solo si se está modificando)
+    if (updates.sku !== undefined) {
+      await assertSkuUnique(updates.sku, id); // lanza 409 si existe otro
+    }
+
+    // Forzar CLP si se toca el precio
+    if (updates.price !== undefined) {
       updates.currency = "CLP";
     } else {
       delete updates.currency;
@@ -167,17 +213,34 @@ async function updateProduct(req, res) {
 
     updates.updatedAt = new Date().toISOString();
 
-    const ref = db.collection("products").doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) return res.status(404).json({ ok: false, message: "Producto no encontrado" });
-
+    // Actualizar
     await ref.update(updates);
 
     const updated = await ref.get();
-    return res.json({ ok: true, id, item: { id: updated.id, ...updated.data() } });
+
+    return res.json({
+      ok: true,
+      id,
+      item: {
+        id: updated.id,
+        ...updated.data(),
+      },
+    });
   } catch (err) {
     console.error("updateProduct error:", err);
-    return res.status(500).json({ ok: false, message: "Error actualizando producto" });
+
+    // SKU duplicado
+    if (err.status === 409) {
+      return res.status(409).json({
+        ok: false,
+        message: err.message,
+      });
+    }
+
+    return res.status(500).json({
+      ok: false,
+      message: "Error actualizando producto",
+    });
   }
 }
 

@@ -9,8 +9,8 @@ const audit = require("../middlewares/audit.middleware");
 // POST /api/products (solo admin)
 router.post("/products", firebaseAuth, requireRole("admin"), audit("product.create"), createProduct);
 
-router.get("/products", firebaseAuth, requireRole("admin"), audit("product.list"), productsList);
-router.get("/products/:id", firebaseAuth, requireRole("admin"), audit("product.read"), getProductById);
+router.get("/products", firebaseAuth, audit("product.list"), productsList);
+router.get("/products/:id", firebaseAuth, audit("product.read"), getProductById);
 
 router.put("/products/:id", firebaseAuth, requireRole("admin"), audit("product.update"), updateProduct);
 

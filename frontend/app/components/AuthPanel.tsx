@@ -26,6 +26,7 @@ export default function AuthPanel() {
   // Estado del usuario
   const [email, setEmail] = useState<string | null>(null);
   const [uid, setUid] = useState<string | null>(null);
+  const [role, setRole] = useState<"admin" | "user" | "demo">("demo");
 
   // Token JWT de Firebase
   const [token, setToken] = useState<string>("");
@@ -40,26 +41,33 @@ export default function AuthPanel() {
    * - Obtiene el idToken real del usuario
    */
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        // Usuario no logueado
-        setEmail(null);
-        setUid(null);
-        setToken("");
-        return;
-      }
+  const unsub = onAuthStateChanged(auth, async (user) => {
+    if (!user) {
+      // Usuario no logueado
+      setEmail(null);
+      setUid(null);
+      setToken("");
+      setRole("demo");
+      return;
+    }
 
-      // Usuario logueado
-      setEmail(user.email);
-      setUid(user.uid);
+    // Usuario logueado
+    setEmail(user.email);
+    setUid(user.uid);
 
-      // 🔐 ESTE ES EL TOKEN QUE EL BACKEND VERIFICA
-      const idToken = await user.getIdToken(true);
-      setToken(idToken);
-    });
+    // 🔐 Token + claims (roles)
+    const idTokenResult = await user.getIdTokenResult(true);
 
-    return () => unsub();
-  }, []);
+    setToken(idTokenResult.token);
+
+    // 👉 aquí vienen los custom claims del backend
+    const roleFromToken = (idTokenResult.claims.role as any) || "user";
+    setRole(roleFromToken);
+  });
+
+  // ⬅️ ESTE return va AQUÍ
+  return () => unsub();
+}, []);
 
   /**
    * Login con Google
@@ -101,6 +109,7 @@ export default function AuthPanel() {
       <p>Estado: {email ? "Logueado" : "Sin sesión"}</p>
       <p>Email: {email ?? "(no logueado)"}</p>
       <p>UID: {uid ?? "(no logueado)"}</p>
+      <p>Rol: <b>{role}</b></p>
 
       {/* Token */}
       <div>
@@ -127,12 +136,19 @@ export default function AuthPanel() {
             Cerrar sesión
           </button>
 
-          <button
+          {email && role === "admin" && (
+            <button
             onClick={loadProducts}
             className="px-4 py-2 rounded bg-green-600 text-white"
-          >
-            Cargar productos (ruta protegida)
-          </button>
+            >
+              Cargar productos (admin)
+            </button>
+          )}
+          {email && role !== "admin" && (
+            <p className="text-sm opacity-70">
+              No tienes permisos para cargar productos
+              </p>
+          )}
         </div>
       )}
 
