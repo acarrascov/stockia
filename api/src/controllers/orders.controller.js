@@ -1,5 +1,6 @@
 // src/controllers/orders.controller.js
 const { db } = require("../config/firebase");
+const { getTenantAndPlan } = require("../services/tenantPlan.service");
 
 // Helpers
 function nowISO() {
@@ -7,36 +8,47 @@ function nowISO() {
 }
 
 // GET /orders
-// - admin: ve todos
-// - user: ve solo los suyos
+// Lista pedidos del tenant, ordenados por createdAt desc
+// Query opcional: ?limit=20&cursor=2025-12-30T00:00:00.000Z
 async function listOrders(req, res) {
   try {
     const uid = req.user?.uid;
-    const role = req.user?.role || req.user?.claims?.role; // según cómo lo guardes
+    if (!uid) return res.status(401).json({ ok: false, message: "No autorizado" });
 
-    let q = db.collection("orders");
+    const { tenantId } = await getTenantAndPlan(req);
 
-    if (role !== "admin") {
-      q = q.where("userId", "==", uid);
-    }
+    const limitRaw = Number(req.query.limit ?? 20);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 50) : 20;
 
-    const snap = await q.orderBy("createdAt", "desc").get();
+    const cursor = req.query.cursor ? String(req.query.cursor) : null;
+
+    let q = db
+      .collection("orders")
+      .where("tenantId", "==", tenantId)
+      .orderBy("createdAt", "desc")
+      .limit(limit);
+
+    if (cursor) q = q.startAfter(cursor);
+
+    const snap = await q.get();
     const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    return res.json({ ok: true, items });
+    const nextCursor = items.length > 0 ? items[items.length - 1].createdAt : null;
+
+    return res.json({ ok: true, items, nextCursor });
   } catch (err) {
     console.error("listOrders error:", err);
-    return res.status(500).json({ ok: false, message: "Error listando pedidos" });
+    return res.status(400).json({ ok: false, message: err.message || "Error listando pedidos" });
   }
 }
 
 // POST /orders
-// Crea un pedido simple desde el carrito (items + total)
-// body esperado:
-// { items: [{ productId, name, price, qty }], total }
+// body esperado: { items: [{ productId, name, price, qty }], total }
 async function createOrder(req, res) {
   try {
     const uid = req.user?.uid;
     if (!uid) return res.status(401).json({ ok: false, message: "No autorizado" });
+
+    const { tenantId, planId, plan } = await getTenantAndPlan(req);
 
     const { items, total } = req.body;
 
@@ -49,7 +61,6 @@ async function createOrder(req, res) {
       return res.status(400).json({ ok: false, message: "Total inválido" });
     }
 
-    // Normalización mínima
     const normItems = items.map((it) => ({
       productId: String(it.productId || ""),
       name: String(it.name || ""),
@@ -57,68 +68,101 @@ async function createOrder(req, res) {
       qty: Number(it.qty || 0),
     }));
 
-    // Validación mínima por item
     for (const it of normItems) {
-      if (!it.productId) {
-        return res.status(400).json({ ok: false, message: "productId faltante" });
-      }
-      if (!Number.isFinite(it.price) || it.price < 0) {
-        return res.status(400).json({ ok: false, message: "price inválido" });
-      }
-      if (!Number.isFinite(it.qty) || it.qty <= 0) {
-        return res.status(400).json({ ok: false, message: "qty inválido" });
-      }
+      if (!it.productId) return res.status(400).json({ ok: false, message: "productId faltante" });
+      if (!Number.isFinite(it.price) || it.price < 0) return res.status(400).json({ ok: false, message: "price inválido" });
+      if (!Number.isFinite(it.qty) || it.qty <= 0) return res.status(400).json({ ok: false, message: "qty inválido" });
     }
 
     const now = nowISO();
+    const monthKey = now.slice(0, 7); // "YYYY-MM"
+    const usageDocId = `${tenantId}_${monthKey}`;
 
-    // Documento base de la orden
     const orderDoc = {
+      tenantId,
+      planId,
       userId: uid,
       items: normItems,
       total: totalNum,
       currency: "CLP",
-      status: "pending", // pending | paid | cancelled
+      status: "pending",
       createdAt: now,
       updatedAt: now,
     };
 
-    // ✅ Transacción: valida y descuenta stock + crea la orden
-    const result = await db.runTransaction(async (tx) => {
-      // 1) Leer y validar stock de todos los productos
-      const productRefs = normItems.map((it) => db.collection("products").doc(it.productId));
-      const productSnaps = await Promise.all(productRefs.map((ref) => tx.get(ref)));
+    const maxOrdersPerMonth = Number(plan?.limits?.ordersPerMonth ?? 0);
 
+    const result = await db.runTransaction(async (tx) => {
+      // ===== READS primero =====
+      const productRefs = normItems.map((it) => db.collection("products").doc(it.productId));
+      const usageRef = db.collection("usage").doc(usageDocId);
+
+      const [usageSnap, ...productSnaps] = await Promise.all([
+        tx.get(usageRef),
+        ...productRefs.map((ref) => tx.get(ref)),
+      ]);
+
+      // ===== Validar usage mensual =====
+      const currentOrdersUsed = usageSnap.exists ? Number(usageSnap.data()?.ordersUsed ?? 0) : 0;
+
+      if (!Number.isFinite(currentOrdersUsed) || currentOrdersUsed < 0) {
+        throw new Error("Contador mensual inválido (usage.ordersUsed)");
+      }
+
+      if (Number.isFinite(maxOrdersPerMonth) && maxOrdersPerMonth > 0) {
+        if (currentOrdersUsed >= maxOrdersPerMonth) {
+          throw new Error(`Límite mensual de pedidos alcanzado (${currentOrdersUsed}/${maxOrdersPerMonth})`);
+        }
+      }
+
+      // ===== Validar stock + tenant =====
       for (let i = 0; i < normItems.length; i++) {
         const it = normItems[i];
         const snap = productSnaps[i];
 
-        if (!snap.exists) {
-          throw new Error(`Producto no encontrado: ${it.productId}`);
-        }
+        if (!snap.exists) throw new Error(`Producto no encontrado: ${it.productId}`);
 
         const data = snap.data() || {};
-        const currentStock = Number(data.stock ?? 0);
 
-        if (!Number.isFinite(currentStock)) {
-          throw new Error(`Stock inválido en producto: ${it.productId}`);
+        // Multi-tenant
+        if (data.tenantId && data.tenantId !== tenantId) {
+          throw new Error(`Producto no pertenece al tenant: ${it.productId}`);
         }
 
+        const currentStock = Number(data.stock ?? 0);
+        if (!Number.isFinite(currentStock)) throw new Error(`Stock inválido en producto: ${it.productId}`);
+
         if (currentStock < it.qty) {
-          throw new Error(`Stock insuficiente para "${data.name ?? it.productId}" (stock: ${currentStock}, pedido: ${it.qty})`);
+          throw new Error(
+            `Stock insuficiente para "${data.name ?? it.productId}" (stock: ${currentStock}, pedido: ${it.qty})`
+          );
         }
       }
 
-      // 2) Descontar stock
+      // ===== WRITES =====
+
+      // Descontar stock
       for (let i = 0; i < normItems.length; i++) {
         const it = normItems[i];
         const ref = productRefs[i];
-        const currentStock = Number(productSnaps[i].data().stock ?? 0);
+        const currentStock = Number(productSnaps[i].data()?.stock ?? 0);
         tx.update(ref, { stock: currentStock - it.qty, updatedAt: now });
       }
 
-      // 3) Crear la orden
-      const orderRef = db.collection("orders").doc(); // id generado
+      // Incrementar usage mensual
+      tx.set(
+        usageRef,
+        {
+          tenantId,
+          month: monthKey,
+          ordersUsed: currentOrdersUsed + 1,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+
+      // Crear orden
+      const orderRef = db.collection("orders").doc();
       tx.set(orderRef, orderDoc);
 
       return { orderId: orderRef.id };
@@ -131,7 +175,6 @@ async function createOrder(req, res) {
     });
   } catch (err) {
     console.error("createOrder error:", err);
-    // Mensaje “amigable” con la causa (stock insuficiente, etc.)
     return res.status(400).json({ ok: false, message: err.message || "Error creando pedido" });
   }
 }

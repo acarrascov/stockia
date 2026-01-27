@@ -13,6 +13,7 @@ const adminClaimsRoutes = require("./adminClaims.routes"); // Rutas para gestió
 const productsRoutes = require("./products.routes"); // Rutas para gestión de productos. Sirven para crear, leer, actualizar y eliminar productos.
 const auditLogsRoutes = require("./auditLogs.routes"); // Rutas para gestión de logs de auditoría. Sirven para revisar las acciones realizadas en el sistema.
 const ordersRoutes = require("./orders.routes"); // Rutas para gestión de pedidos. Sirven para crear, listar y actualizar pedidos.
+const usersRoutes = require("./users.routes");
 
 // Montamos rutas de pedidos
 router.use("/orders", ordersRoutes);
@@ -24,5 +25,6 @@ router.use(meRoutes);
 router.use(adminClaimsRoutes);
 router.use(productsRoutes);
 router.use(auditLogsRoutes);
+router.use("/users", usersRoutes);
 
 module.exports = router;

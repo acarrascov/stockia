@@ -4,6 +4,11 @@
  * - Firestore: colección "products"
  */
 const { db } = require("../config/firebase");
+const { getTenantAndPlan } = require("../services/tenantPlan.service");
+
+function nowISO() {
+  return new Date().toISOString();
+}
 
 // Valida payload de producto (crear o actualizar). Payload es el body de la request.
 // esta función se usa tanto para crear como para actualizar (parcial) y valida los campos necesarios
@@ -80,33 +85,63 @@ async function assertSkuUnique(sku, excludeId = null) {
 }
 
 
-// POST /api/products  -> crear producto
+
+// POST /products
 async function createProduct(req, res) {
   try {
-    const { ok, errors, normalized } = validateProductPayload(req.body);
+    const uid = req.user?.uid;
+    if (!uid) return res.status(401).json({ ok: false, message: "No autorizado" });
+
+    // ✅ Tenant + Plan
+    const { tenantId, planId, plan } = await getTenantAndPlan(req);
+
+    // ✅ Límite de productos según plan
+    const maxProducts = Number(plan?.limits?.products ?? 0); // basic=200, pro=2000, full=0/undefined (ilimitado)
+    if (Number.isFinite(maxProducts) && maxProducts > 0) {
+      // Contamos SOLO productos activos del tenant
+      const countSnap = await db
+        .collection("products")
+        .where("tenantId", "==", tenantId)
+        .where("active", "==", true)
+        .count()
+        .get();
+
+      const current = Number(countSnap.data()?.count ?? 0);
+
+      if (current >= maxProducts) {
+        return res.status(403).json({
+          ok: false,
+          message: `Límite de productos alcanzado (${current}/${maxProducts}) para el plan ${planId}.`,
+        });
+      }
+    }
+
+    // ✅ Validación payload (tu lógica existente)
+    const { ok, errors, normalized } = validateProductPayload(req.body, { partial: false });
     if (!ok) return res.status(400).json({ ok: false, errors });
 
-    const { name, sku, category, price, stock } = normalized;
+    // Normalizado: name, sku, category, price, stock, active?, currency?
+    const now = nowISO();
 
-    await assertSkuUnique(sku); // lanza error 409 si ya existe
+    // Asegurar SKU único (tu helper)
+    await assertSkuUnique(normalized.sku);
 
-    const now = new Date().toISOString();
-
-    const docRef = await db.collection("products").add({
-      name: name.trim(),
-      sku: sku.trim(),
-      category: category ? category.trim() : null,
-      price,
+    const doc = {
+      tenantId,
+      planId, // opcional pero útil para auditoría
+      ...normalized,
       currency: "CLP",
-      stock,
       active: true,
       createdAt: now,
       updatedAt: now,
-    });
+    };
 
-    return res.status(201).json({ ok: true, id: docRef.id });
-  } catch (error) {
-    return res.status(500).json({ ok: false, message: error.message });
+    const ref = await db.collection("products").add(doc);
+
+    return res.status(201).json({ ok: true, id: ref.id, item: { id: ref.id, ...doc } });
+  } catch (err) {
+    console.error("createProduct error:", err);
+    return res.status(400).json({ ok: false, message: err.message || "Error creando producto" });
   }
 }
 
