@@ -11,3 +11,6 @@ api/serviceAccountKey.json
 
 # OS
 .DS_Store
+
+# Generated files
+gen_guia.py
